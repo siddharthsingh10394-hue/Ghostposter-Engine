@@ -1,0 +1,400 @@
+{
+  "name": "Ghostposter Engine",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "4c897cf8-5c1a-4a03-a74a-f833e4a22bb5",
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1600,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "assign-url-001",
+              "name": "youtube_url",
+              "value": "https://www.youtube.com/watch?v=Uujd699E4Y0",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4d845eb8-52b6-4e5c-a829-75e96a2ded4a",
+      "name": "Set YouTube URL",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.3,
+      "position": [
+        -1376,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ========================================\n// STEP 1: Extract Video ID from YouTube URL\n// Supports: youtube.com/watch?v=, youtu.be/, /embed/, /shorts/\n// ========================================\nconst url = $input.first().json.youtube_url;\n\nconst regex = /(?:youtube\\.com\\/(?:[^\\/]+\\/.+\\/|(?:v|e(?:mbed)?|shorts)\\/|.*[?&]v=)|youtu\\.be\\/)([^\"&?\\/\\s]{11})/;\nconst match = url.match(regex);\n\nif (!match || !match[1]) {\n  throw new Error('Invalid YouTube URL. Must be a valid youtube.com or youtu.be link. Got: ' + url);\n}\n\nconst videoId = match[1];\nconsole.log('Extracted Video ID:', videoId);\n\nreturn [\n  {\n    json: {\n      videoId: videoId,\n      youtube_url: url\n    }\n  }\n];"
+      },
+      "id": "d6643389-4ddd-4ef5-aa33-08c749cc3505",
+      "name": "Extract Video ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1152,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.supadata.ai/v1/youtube/transcript?videoId={{ $json.videoId }}&lang=en",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "1b8915a3-a482-4d65-bb89-aa04c9860aa2",
+      "name": "Fetch YouTube Transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -944,
+        -64
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "o3UoppShNoyW1zgt",
+          "name": "Header Auth account 2"
+        }
+      },
+      "notes": "CREDENTIAL SETUP:\n1. Go to supadata.ai and create free account (100 req/month free)\n2. Copy your API key\n3. In n8n Credentials, create 'Header Auth'\n   Name: Supadata API Key\n   Header Name: x-api-key\n   Header Value: YOUR_SUPADATA_API_KEY"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ========================================\n// STEP 2: Clean and normalize the transcript\n// Handles multiple response formats from Supadata API\n// ========================================\nconst data = $input.first().json;\nconsole.log('Raw transcript response keys:', Object.keys(data));\n\nlet transcript = '';\n\n// Handle Supadata response format\nif (data.content && Array.isArray(data.content)) {\n  // Array of { text, offset, duration } objects\n  transcript = data.content.map(segment => segment.text || '').join(' ');\n} else if (data.transcript && typeof data.transcript === 'string') {\n  transcript = data.transcript;\n} else if (data.text) {\n  transcript = data.text;\n} else if (typeof data === 'string') {\n  transcript = data;\n} else {\n  // Last resort: stringify and use it\n  const raw = JSON.stringify(data);\n  throw new Error('Unexpected transcript format. Raw response: ' + raw.substring(0, 300));\n}\n\n// Clean the transcript\ntranscript = transcript\n  .replace(/\\[Music\\]/gi, '')\n  .replace(/\\[Applause\\]/gi, '')\n  .replace(/\\[Laughter\\]/gi, '')\n  .replace(/\\[.*?\\]/g, '')          // Remove any [bracket] annotations\n  .replace(/&amp;/g, '&')\n  .replace(/&lt;/g, '<')\n  .replace(/&gt;/g, '>')\n  .replace(/&#39;/g, \"'\")\n  .replace(/&quot;/g, '\"')\n  .replace(/\\s+/g, ' ')             // Collapse whitespace\n  .trim();\n\n// Limit to ~3500 chars to stay within OpenRouter token budget\nconst MAX_CHARS = 3500;\nif (transcript.length > MAX_CHARS) {\n  transcript = transcript.substring(0, MAX_CHARS) + '... [transcript truncated]';\n}\n\nconsole.log('Cleaned transcript length:', transcript.length, 'chars');\n\nif (transcript.length < 50) {\n  throw new Error('Transcript too short or empty. Video may have no captions. Length: ' + transcript.length);\n}\n\nreturn [\n  {\n    json: {\n      transcript: transcript,\n      transcriptLength: transcript.length\n    }\n  }\n];"
+      },
+      "id": "edc4160a-4a8c-4b2f-97db-4edef9c716e2",
+      "name": "Clean Transcript",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: 'openai/gpt-oss-120b:free',\n  max_tokens: 800,\n  messages: [\n    {\n      role: 'system',\n      content: 'You are a LinkedIn expert. Write short, punchy posts with a hook and CTA. IMPORTANT LANGUAGE RULE: If the transcript is in Hindi, you MUST write the final posts in Hinglish (a highly conversational mix of Hindi and English written entirely in the Roman alphabet/English letters). Do NOT use Devanagari script. If the transcript is in English, write in pure English.'\n    },\n    {\n      role: 'user',\n      content: 'Write 3 LinkedIn posts from this transcript.\\n\\nPOST1:\\n[content]\\n\\nPOST2:\\n[content]\\n\\nPOST3:\\n[content]\\n\\nTranscript:\\n' + $json.transcript.substring(0, 1000)\n    }\n  ]\n} }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "6cc620f5-fdde-4cd1-956d-9139afd0a4ee",
+      "name": "Generate LinkedIn Posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -496,
+        -224
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "NyAZJGvXVdndhiA5",
+          "name": "Header Auth account"
+        }
+      },
+      "notes": "CREDENTIAL SETUP:\n1. Go to openrouter.ai, create account, get API key\n2. Create 'Header Auth' credential in n8n:\n   Name: OpenRouter API Key\n   Header Name: Authorization\n   Header Value: ADD_YOUR_API_KEY\n\nModel used: mistral-7b-instruct (free tier available)\nChange to 'openai/gpt-4o' for better quality"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: 'openai/gpt-oss-120b:free',\n  max_tokens: 2000,\n  messages: [\n    {\n      role: 'system',\n      content: 'You are a Twitter/X viral content expert. Write punchy, provocative threads. Tweet 1 is always the hook. Tweets 2-4 are evidence. Tweet 5 is the takeaway. EACH TWEET UNDER 270 CHARACTERS. IMPORTANT LANGUAGE RULE: If the transcript is in Hindi, you MUST write the threads in Hinglish (a highly conversational mix of Hindi and English written entirely in the Roman alphabet/English letters). Do NOT use Devanagari script. If the transcript is in English, write in pure English.'\n    },\n    {\n      role: 'user',\n      content: 'Based on this YouTube transcript, write EXACTLY 3 Twitter threads. Each thread has EXACTLY 5 tweets. Format EXACTLY like this:\\n\\nTHREAD1:\\nTweet1: [content - max 270 chars]\\nTweet2: [content - max 270 chars]\\nTweet3: [content - max 270 chars]\\nTweet4: [content - max 270 chars]\\nTweet5: [content - max 270 chars]\\n\\nTHREAD2:\\nTweet1: [content]\\nTweet2: [content]\\nTweet3: [content]\\nTweet4: [content]\\nTweet5: [content]\\n\\nTHREAD3:\\nTweet1: [content]\\nTweet2: [content]\\nTweet3: [content]\\nTweet4: [content]\\nTweet5: [content]\\n\\nTranscript:\\n' + $json.transcript\n    }\n  ]\n} }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "50047c50-a398-426f-aa08-73d4078b10ec",
+      "name": "Generate Twitter Threads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -496,
+        96
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "NyAZJGvXVdndhiA5",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ========================================\n// STEP 3: Parse LinkedIn posts from AI response\n// ========================================\nconst response = $input.first().json;\n\nif (!response.choices || !response.choices[0]) {\n  throw new Error('OpenRouter returned no choices. Full response: ' + JSON.stringify(response).substring(0, 300));\n}\n\nconst rawText = response.choices[0].message.content;\nconsole.log('LinkedIn raw AI response (first 300 chars):', rawText.substring(0, 300));\n\nconst posts = [];\n\n// Primary parser: look for POST1:, POST2: etc\nconst postRegex = /POST(\\d+):[\\s\\S]*?(?=POST\\d+:|$)/gi;\nlet match;\n\nwhile ((match = postRegex.exec(rawText)) !== null) {\n  const content = match[0]\n    .replace(/^POST\\d+:\\s*/i, '')\n    .trim();\n  \n  if (content && content.length > 30) {\n    posts.push({\n      json: {\n        platform: 'linkedin',\n        postNumber: parseInt(match[1]),\n        content: content,\n        charCount: content.length,\n        status: 'pending_review'\n      }\n    });\n  }\n}\n\n// Fallback parser: split by double newlines if primary fails\nif (posts.length === 0) {\n  console.log('Primary parser failed, using fallback...');\n  const chunks = rawText.split(/\\n{2,}/).filter(c => c.trim().length > 80);\n  chunks.slice(0, 5).forEach((chunk, i) => {\n    posts.push({\n      json: {\n        platform: 'linkedin',\n        postNumber: i + 1,\n        content: chunk.trim(),\n        charCount: chunk.trim().length,\n        status: 'pending_review',\n        parsedViaFallback: true\n      }\n    });\n  });\n}\n\nconsole.log('Parsed LinkedIn posts:', posts.length);\n\nif (posts.length === 0) {\n  throw new Error('Could not parse any LinkedIn posts from AI response. Raw: ' + rawText.substring(0, 500));\n}\n\nreturn posts;"
+      },
+      "id": "cdb5c02e-cbfe-4522-8393-4c8893260314",
+      "name": "Parse LinkedIn Posts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -272,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ========================================\n// STEP 4: Parse Twitter threads from AI response\n// ========================================\nconst response = $input.first().json;\n\nif (!response.choices || !response.choices[0]) {\n  throw new Error('OpenRouter returned no choices for Twitter. Full response: ' + JSON.stringify(response).substring(0, 300));\n}\n\nconst rawText = response.choices[0].message.content;\nconsole.log('Twitter raw AI response (first 300 chars):', rawText.substring(0, 300));\n\nconst threads = [];\n\n// Primary parser: extract THREAD1:, THREAD2: etc\nconst threadRegex = /THREAD(\\d+):[\\s\\S]*?(?=THREAD\\d+:|$)/gi;\nlet threadMatch;\n\nwhile ((threadMatch = threadRegex.exec(rawText)) !== null) {\n  const threadBody = threadMatch[0].replace(/^THREAD\\d+:\\s*/i, '').trim();\n  const tweets = [];\n  \n  // Extract individual tweets\n  const tweetRegex = /Tweet(\\d+):\\s*(.+?)(?=Tweet\\d+:|$)/gis;\n  let tweetMatch;\n  \n  while ((tweetMatch = tweetRegex.exec(threadBody)) !== null) {\n    const tweetContent = tweetMatch[2].trim();\n    if (tweetContent.length > 0 && tweetContent.length <= 280) {\n      tweets.push(tweetContent);\n    } else if (tweetContent.length > 280) {\n      // Truncate tweets over character limit\n      tweets.push(tweetContent.substring(0, 277) + '...');\n    }\n  }\n  \n  if (tweets.length > 0) {\n    threads.push({\n      json: {\n        platform: 'twitter',\n        threadNumber: parseInt(threadMatch[1]),\n        tweets: tweets,\n        fullThread: tweets.map((t, i) => `${i+1}/${tweets.length} ${t}`).join('\\n\\n'),\n        tweetCount: tweets.length,\n        status: 'pending_review'\n      }\n    });\n  }\n}\n\n// Fallback: use entire response as one thread\nif (threads.length === 0) {\n  console.log('Thread parser failed, using fallback...');\n  threads.push({\n    json: {\n      platform: 'twitter',\n      threadNumber: 1,\n      tweets: [rawText.trim().substring(0, 270)],\n      fullThread: rawText.trim().substring(0, 270),\n      tweetCount: 1,\n      status: 'pending_review',\n      parsedViaFallback: true\n    }\n  });\n}\n\nconsole.log('Parsed Twitter threads:', threads.length);\nreturn threads;"
+      },
+      "id": "2dcebeb5-4459-4807-851c-3aee02b5cd48",
+      "name": "Parse Twitter Threads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -272,
+        96
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "7c09de31-566a-48d7-b6ad-7ec623949652",
+      "name": "Merge All Posts",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        -64,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ========================================\n// STEP 5: Log all posts before scheduling\n// REVIEW these in execution logs before enabling Buffer!\n// ========================================\nconst items = $input.all();\n\nconsole.log('\\n========== GHOSTPOSTER REVIEW ==========');\nconsole.log(`Total posts ready to schedule: ${items.length}`);\nconsole.log('');\n\nitems.forEach((item, idx) => {\n  const d = item.json;\n  console.log(`--- Post ${idx + 1} [${d.platform.toUpperCase()}] ---`);\n  if (d.platform === 'linkedin') {\n    console.log(`Post #${d.postNumber}:`);\n    console.log(d.content);\n  } else {\n    console.log(`Thread #${d.threadNumber} (${d.tweetCount} tweets):`);\n    console.log(d.fullThread);\n  }\n  console.log('');\n});\n\nconsole.log('=========================================');\n\n// Pass through all items unchanged\nreturn items;"
+      },
+      "id": "01ad6c7c-d913-49d2-b5f5-e266e1118f1a",
+      "name": "Review Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        -64
+      ],
+      "notes": "IMPORTANT: Check execution logs here!\nAll posts are printed for your review.\nIf anything looks bad - stop the workflow.\nTo add human approval: replace this node with a 'Wait' node set to 'Wait for webhook'"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nlet body = 'GHOSTPOSTER ENGINE - POSTS READY\\n\\n';\nbody += '==================================================\\n\\n';\n\nconst linkedin = items.filter(i => i.json.platform === 'linkedin');\nconst twitter = items.filter(i => i.json.platform === 'twitter');\n\nbody += 'LINKEDIN POSTS (' + linkedin.length + ')\\n';\nbody += '==================================================\\n\\n';\n\nlinkedin.forEach((item, idx) => {\n  body += 'POST ' + (idx + 1) + ':\\n';\n  body += item.json.content + '\\n\\n';\n  body += '--------------------------------------------------\\n\\n';\n});\n\nbody += 'TWITTER THREADS (' + twitter.length + ')\\n';\nbody += '==================================================\\n\\n';\n\ntwitter.forEach((item, idx) => {\n  body += 'THREAD ' + (idx + 1) + ':\\n';\n  item.json.tweets.forEach((tweet, ti) => {\n    body += (ti + 1) + '. ' + tweet + '\\n';\n  });\n  body += '\\n--------------------------------------------------\\n\\n';\n});\n\nreturn [{\n  json: {\n    subject: 'Ghostposter: ' + (linkedin.length + twitter.length) + ' posts ready to publish',\n    body: body,\n    totalPosts: items.length\n  }\n}];"
+      },
+      "id": "362c63a1-76ab-4879-92ad-2b0fe24bed00",
+      "name": "Format Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "rg7891118@gmail.com",
+        "toEmail": "siddarthsingh2019@gmail.com",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "=={{ $json.body }}",
+        "options": {}
+      },
+      "id": "42f5cf8d-f4b6-4536-b5c8-c4b36f80e156",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        608,
+        -16
+      ],
+      "webhookId": "b2fce6c8-1d29-4972-8155-f37e1d2036c6",
+      "credentials": {
+        "smtp": {
+          "id": "Qr4iLRsjVttCTlfq",
+          "name": "SMTP account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Set YouTube URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set YouTube URL": {
+      "main": [
+        [
+          {
+            "node": "Extract Video ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Video ID": {
+      "main": [
+        [
+          {
+            "node": "Fetch YouTube Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch YouTube Transcript": {
+      "main": [
+        [
+          {
+            "node": "Clean Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Transcript": {
+      "main": [
+        [
+          {
+            "node": "Generate LinkedIn Posts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Generate Twitter Threads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate LinkedIn Posts": {
+      "main": [
+        [
+          {
+            "node": "Parse LinkedIn Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Twitter Threads": {
+      "main": [
+        [
+          {
+            "node": "Parse Twitter Threads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LinkedIn Posts": {
+      "main": [
+        [
+          {
+            "node": "Merge All Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Twitter Threads": {
+      "main": [
+        [
+          {
+            "node": "Merge All Posts",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge All Posts": {
+      "main": [
+        [
+          {
+            "node": "Review Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review Log": {
+      "main": [
+        [
+          {
+            "node": "Format Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Email": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "65a5b1f5-1f86-4a98-aa51-0c263eecfe82",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b9c1cb69b599a96715edba0a1054c8925e36f45d62753cbe97d09498c3f69350"
+  },
+  "id": "vxCD9uHcqcFk3cmL",
+  "tags": []
+}
